@@ -1,12 +1,38 @@
 """CLI entry point. See SPEC.md §7 for the target command surface.
 
-`ingest` is wired up; `ingest-itunes` and `recommend` are not implemented yet.
+Recommendations are ranked purely by embedding similarity — no artist de-dup/cap.
 """
 
 import argparse
 
-from config import AUDIO_DIR
-from src.ingest import ingest_folder
+import numpy as np
+import pandas as pd
+
+from config import AUDIO_DIR, CATALOG_PATH, EMB_PATH
+from src.ingest import ingest_folder, ingest_itunes
+from src.recommend import recommend, recommend_from_file, recommend_from_search
+
+
+def _print_results(results: list) -> None:
+    if not results:
+        print("No results.")
+        return
+    print(f"{'rank':>4}  {'score':>7}  {'title':<40}  {'artist':<30}")
+    for rank, r in enumerate(results, start=1):
+        print(f"{rank:>4}  {r['score']:>7.4f}  {str(r['title'])[:40]:<40}  {str(r['artist'])[:30]:<30}")
+
+
+def _recommend_by_track_id(track_id: int, k: int) -> list:
+    catalog = pd.read_parquet(CATALOG_PATH)
+    matches = catalog.index[catalog["track_id"] == track_id]
+    if len(matches) == 0:
+        raise SystemExit(f"track_id {track_id} not found in catalog")
+    row_pos = int(matches[0])
+
+    embeddings = np.load(EMB_PATH)
+    query_vector = embeddings[row_pos]
+
+    return recommend(query_vector, k=k, exclude_track_id=track_id)
 
 
 def main() -> None:
@@ -16,14 +42,36 @@ def main() -> None:
     ingest_parser = subparsers.add_parser("ingest")
     ingest_parser.add_argument("--audio-dir", default=AUDIO_DIR)
 
-    subparsers.add_parser("ingest-itunes")
-    subparsers.add_parser("recommend")
+    ingest_itunes_parser = subparsers.add_parser("ingest-itunes")
+    ingest_itunes_parser.add_argument("--csv", required=True)
+
+    recommend_parser = subparsers.add_parser("recommend")
+    query_group = recommend_parser.add_mutually_exclusive_group(required=True)
+    query_group.add_argument("--track-id", type=int)
+    query_group.add_argument("--file", type=str)
+    query_group.add_argument("--search", type=str)
+    recommend_parser.add_argument("--k", type=int, default=10)
 
     args = parser.parse_args()
 
     if args.command == "ingest":
         ingest_folder(args.audio_dir)
         return
+
+    if args.command == "ingest-itunes":
+        ingest_itunes(args.csv)
+        return
+
+    if args.command == "recommend":
+        if args.track_id is not None:
+            results = _recommend_by_track_id(args.track_id, args.k)
+        elif args.file is not None:
+            results = recommend_from_file(args.file, k=args.k)
+        else:
+            results = recommend_from_search(args.search, k=args.k)
+        _print_results(results)
+        return
+
     if args.command is None:
         parser.print_help()
         return

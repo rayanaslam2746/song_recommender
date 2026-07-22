@@ -9,3 +9,4 @@ pandas
 pyarrow
 requests
 tqdm
+pytest

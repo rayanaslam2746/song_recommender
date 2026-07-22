@@ -6,13 +6,13 @@ A song recommender that matches tracks purely by **how they sound** — genre, t
 
 The acid test: a melodic Tamil R&B track (e.g. "Unakkul Naanae") should surface Bryson Tiller–style tracks as neighbors, because they occupy the same sonic space. Two songs by the same artist that sound nothing alike should **not** be treated as similar.
 
-This is a **content-based audio-similarity** system, not collaborative filtering. There is no user history and no metadata in the similarity math. Metadata (artist/title) is stored for display and de-duplication only — never for scoring.
+This is a **content-based audio-similarity** system, not collaborative filtering. There is no user history and no metadata in the similarity math. Metadata (artist/title) is stored for display only — never for scoring.
 
 ## 1. Core design principles (do not violate)
 
 1. **Similarity is computed only from audio embeddings.** Artist, language, title, genre tags, year — none of these ever enter the distance calculation.
 2. **The embedding model must be language- and artist-agnostic by construction.** We use a pretrained audio encoder that only ever sees the waveform.
-3. **De-duplicate by artist at recommendation time**, not at scoring time. We find the nearest-sounding tracks first, then optionally cap how many come from any single artist so results are diverse and sound-driven (directly addresses the "don't just give me more of the same artist" requirement).
+3. **Ranking is purely merit-based on similarity score** — fully sorted by how close the match is, nothing else. If the closest matches happen to share an artist, that's fine; results are never capped or filtered by artist.
 
 ## 2. Tech stack
 
@@ -69,7 +69,7 @@ song-vibe-recommender/
 │   ├── embed.py              # CLAP wrapper: samples → 512-d vector
 │   ├── ingest.py            # build catalog from a folder and/or iTunes CSV
 │   ├── index_store.py        # build / save / load FAISS index
-│   └── recommend.py          # nearest-neighbor query + artist de-dup
+│   └── recommend.py          # nearest-neighbor query, ranked purely by similarity
 └── tests/
     └── test_smoke.py
 ```
@@ -82,7 +82,7 @@ song-vibe-recommender/
 |---------------|--------|---------------------------------------------------|
 | `track_id`    | int    | stable id = row index                             |
 | `title`       | str    | display only                                      |
-| `artist`      | str    | display + de-dup only, never scored               |
+| `artist`      | str    | display only, never scored                        |
 | `source_path` | str    | path to the audio file used                       |
 | `preview_url` | str    | nullable; set if fetched from iTunes              |
 
@@ -117,11 +117,10 @@ Two entry paths, both producing/appending to `catalog.parquet` + `embeddings.npy
 - Rebuild the index from `embeddings.npy` whenever new tracks are ingested (flat index is cheap to rebuild for MVP scale).
 
 ### `src/recommend.py`
-- `recommend(query_vector, k=10, max_per_artist=1, exclude_track_id=None, exclude_artist=None) -> list[dict]`
-  - Normalize the query vector, `index.search(query, k * 8)` (over-fetch so de-dup still leaves enough).
-  - Drop the query track itself (`exclude_track_id`) and any `exclude_artist`.
-  - Walk results in score order, enforcing `max_per_artist` (default 1 → at most one track per artist).
-  - Return top `k` as dicts: `{track_id, title, artist, score, preview_url}`.
+- `recommend(query_vector, k=10, exclude_track_id=None) -> list[dict]`
+  - Normalize the query vector, `index.search(query, k)` (fetch one extra when `exclude_track_id` is set, so dropping it still leaves `k`).
+  - Drop the query track itself (`exclude_track_id`).
+  - Return top `k` in score order as dicts: `{track_id, title, artist, score, preview_url}`. Purely merit-ranked — no artist cap or filter.
 - `recommend_from_file(path, ...)` and `recommend_from_search(query_str, ...)`: embed a brand-new track on the fly (not necessarily in the catalog), then run `recommend`.
 
 ## 7. CLI (`cli.py`)
@@ -134,7 +133,7 @@ python cli.py ingest --audio-dir data/audio
 python cli.py ingest-itunes --csv songs.csv
 
 # Recommend by an existing catalog track
-python cli.py recommend --track-id 42 --k 10 --max-per-artist 1
+python cli.py recommend --track-id 42 --k 10
 
 # Recommend from a brand-new local file not in the catalog
 python cli.py recommend --file ~/Downloads/some_song.mp3 --k 10
@@ -152,7 +151,6 @@ SAMPLE_RATE   = 48000
 CLIP_SECONDS  = 30
 EMBED_DIM     = 512
 CLAP_CKPT     = "music_audioset_epoch_15_esc_90.pt"
-MAX_PER_ARTIST_DEFAULT = 1
 DATA_DIR      = "data"
 AUDIO_DIR     = "data/audio"
 EMB_PATH      = "data/embeddings.npy"
@@ -185,7 +183,7 @@ ITUNES_SLEEP  = 3.0   # seconds between preview fetches
 
 - [ ] `ingest --audio-dir` embeds a folder and produces `catalog.parquet`, `embeddings.npy`, `index.faiss`.
 - [ ] `ingest-itunes --csv` downloads previews and adds them to the catalog.
-- [ ] `recommend --track-id` returns K neighbors ranked by cosine score, respecting `--max-per-artist`.
+- [ ] `recommend --track-id` returns K neighbors ranked purely by cosine score.
 - [ ] `recommend --file` and `--search` work on tracks not already in the catalog.
 - [ ] Similarity uses **only** embeddings — grep the code and confirm no artist/title/genre value ever touches the search or scoring.
 - [ ] Smoke test in `tests/test_smoke.py`: embed 2 clearly-similar clips and 1 clearly-different clip, assert the similar pair scores higher than either does against the outlier.

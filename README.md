@@ -40,7 +40,7 @@ python cli.py ingest --audio-dir data/audio
 python cli.py ingest-itunes --csv songs.csv
 
 # Recommend by an existing catalog track
-python cli.py recommend --track-id 42 --k 10 --max-per-artist 1
+python cli.py recommend --track-id 42 --k 10
 
 # Recommend from a brand-new local file not in the catalog
 python cli.py recommend --file ~/Downloads/some_song.mp3 --k 10
@@ -51,6 +51,9 @@ python cli.py recommend --search "Anirudh Unakkul Naanae" --k 10
 
 ## Status
 
-`src/audio.py`, `src/embed.py`, `src/index_store.py`, and the folder path of
-`src/ingest.py` (`ingest_folder` / `cli.py ingest --audio-dir`) are functional.
-`ingest_itunes` and `src/recommend.py` are stubs, not yet implemented.
+`src/audio.py`, `src/embed.py`, `src/index_store.py`, `src/recommend.py`, and the folder
+path of `src/ingest.py` (`ingest_folder` / `cli.py ingest --audio-dir`) are functional.
+`ingest_itunes` (CSV batch path) is still a stub.
+
+Recommendations are ranked purely by embedding similarity, with no artist de-dup/cap
+(SPEC.md §1.3).

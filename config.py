@@ -4,7 +4,6 @@ SAMPLE_RATE = 48000
 CLIP_SECONDS = 30
 EMBED_DIM = 512
 CLAP_CKPT = "music_audioset_epoch_15_esc_90.pt"
-MAX_PER_ARTIST_DEFAULT = 1
 DATA_DIR = "data"
 AUDIO_DIR = "data/audio"
 EMB_PATH = "data/embeddings.npy"
