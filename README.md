@@ -51,6 +51,6 @@ python cli.py recommend --search "Anirudh Unakkul Naanae" --k 10
 
 ## Status
 
-Early scaffold — `src/audio.py` and `src/embed.py` are functional (load a clip, produce
-a 512-dim CLAP embedding). `ingest`, `index_store`, and `recommend` are stubs, not yet
-implemented.
+`src/audio.py`, `src/embed.py`, `src/index_store.py`, and the folder path of
+`src/ingest.py` (`ingest_folder` / `cli.py ingest --audio-dir`) are functional.
+`ingest_itunes` and `src/recommend.py` are stubs, not yet implemented.
