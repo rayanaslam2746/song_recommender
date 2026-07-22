@@ -1,0 +1,11 @@
+laion_clap
+torch
+torchvision  # undeclared runtime dep of laion_clap (imports torchvision.ops internally)
+faiss-cpu
+librosa
+soundfile
+numpy
+pandas
+pyarrow
+requests
+tqdm

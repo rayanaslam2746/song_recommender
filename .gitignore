@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+
+# large/generated artifacts
+*.pt
+data/audio/*
+!data/audio/.gitkeep
+data/embeddings.npy
+data/catalog.parquet
+data/index.faiss
