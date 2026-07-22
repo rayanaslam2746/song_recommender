@@ -13,7 +13,16 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
-from config import AUDIO_DIR, CATALOG_PATH, EMB_PATH, EMBED_DIM, INDEX_PATH, ITUNES_SLEEP
+from config import (
+    AUDIO_DIR,
+    CATALOG_PATH,
+    EMB_PATH,
+    EMBED_BATCH_SIZE,
+    EMBED_DIM,
+    INDEX_PATH,
+    ITUNES_CHECKPOINT_EVERY,
+    ITUNES_SLEEP,
+)
 from src.audio import load_clip
 from src.embed import embed_batch
 from src.index_store import build_index, normalize_embeddings, save_index
@@ -66,6 +75,21 @@ def _load_embeddings() -> np.ndarray:
     return np.zeros((0, EMBED_DIM), dtype=np.float32)
 
 
+def _persist(catalog: pd.DataFrame, embeddings: np.ndarray):
+    """Normalize + save catalog.parquet, embeddings.npy, and rebuild+save index.faiss so
+    all three always agree, even if the process is killed right after this call returns
+    (SPEC.md §5, §10 "row alignment is sacred"). Cheap even at thousands of rows, so it's
+    safe to call after every chunk, not just once at the end.
+    """
+    os.makedirs(os.path.dirname(CATALOG_PATH), exist_ok=True)
+    normalized = normalize_embeddings(embeddings)
+    np.save(EMB_PATH, normalized)
+    catalog.to_parquet(CATALOG_PATH, index=False)
+    index = build_index(normalized)
+    save_index(index, INDEX_PATH)
+    return normalized, index
+
+
 def ingest_folder(audio_dir: str = AUDIO_DIR, preview_urls: dict = None) -> None:
     """Recursively scan `audio_dir`, embed any tracks not already in the catalog, and
     rebuild catalog.parquet / embeddings.npy / index.faiss. Idempotent: re-running with
@@ -73,6 +97,11 @@ def ingest_folder(audio_dir: str = AUDIO_DIR, preview_urls: dict = None) -> None
 
     `preview_urls`, if given, maps source_path -> iTunes previewUrl for any of the new
     files (used by `ingest_itunes`); files not in the map get `preview_url=None`.
+
+    Embeds in chunks of EMBED_BATCH_SIZE rather than stacking the whole batch into one
+    array — at thousands of tracks, one giant np.stack() would be tens of GB of raw audio
+    and risks OOM. Each chunk is persisted immediately, so a crash mid-run (OOM, ^C,
+    network drop) only loses the current chunk, not everything ingested so far.
     """
     preview_urls = preview_urls or {}
     catalog = _load_catalog()
@@ -81,8 +110,26 @@ def ingest_folder(audio_dir: str = AUDIO_DIR, preview_urls: dict = None) -> None
 
     candidates = [p for p in _find_audio_files(audio_dir) if p not in existing_paths]
 
-    new_rows = []
-    new_samples = []
+    added = 0
+    buffer_rows = []
+    buffer_samples = []
+
+    def flush_buffer():
+        nonlocal catalog, embeddings, added
+        if not buffer_samples:
+            return
+        chunk_embeddings = embed_batch(buffer_samples)
+        embeddings = np.concatenate([embeddings, chunk_embeddings], axis=0)
+        chunk_df = pd.DataFrame(buffer_rows)
+        chunk_df["track_id"] = 0  # placeholder, reassigned below from row index
+        catalog = pd.concat([catalog, chunk_df[list(CATALOG_DTYPES)]], ignore_index=True)
+        catalog["track_id"] = catalog.index  # track_id = stable row index (SPEC.md §5)
+        added += len(buffer_samples)
+        _persist(catalog, embeddings)
+        print(f"  checkpoint: {len(catalog)} total rows persisted ({added} new so far)")
+        buffer_rows.clear()
+        buffer_samples.clear()
+
     for path in tqdm(candidates, desc="Embedding audio"):
         try:
             samples = load_clip(path)
@@ -91,33 +138,22 @@ def ingest_folder(audio_dir: str = AUDIO_DIR, preview_urls: dict = None) -> None
             print(f"[skip] {e}")
             continue
         title, artist = _derive_title_artist(path)
-        new_rows.append(
+        buffer_rows.append(
             {"title": title, "artist": artist, "source_path": path, "preview_url": preview_urls.get(path)}
         )
-        new_samples.append(samples)
+        buffer_samples.append(samples)
+        if len(buffer_samples) >= EMBED_BATCH_SIZE:
+            flush_buffer()
 
-    if new_samples:
-        new_embeddings = embed_batch(new_samples)
-        embeddings = np.concatenate([embeddings, new_embeddings], axis=0)
-        new_df = pd.DataFrame(new_rows)
-        new_df["track_id"] = 0  # placeholder, reassigned below from row index
-        catalog = pd.concat([catalog, new_df[list(CATALOG_DTYPES)]], ignore_index=True)
-        catalog["track_id"] = catalog.index  # track_id = stable row index (SPEC.md §5)
+    flush_buffer()  # final partial chunk, if any
 
-    os.makedirs(os.path.dirname(CATALOG_PATH), exist_ok=True)
-
-    # Normalize once here (index_store is the single source of truth) so embeddings.npy
-    # and the FAISS index always agree (SPEC.md §5, §10).
-    normalized = normalize_embeddings(embeddings)
-    np.save(EMB_PATH, normalized)
-    catalog.to_parquet(CATALOG_PATH, index=False)
-
-    index = build_index(normalized)
-    save_index(index, INDEX_PATH)
+    # Always end with a fresh, consistent persist — covers the "nothing new" case too
+    # (re-running with no new files still leaves catalog/embeddings/index in sync).
+    normalized, index = _persist(catalog, embeddings)
 
     print(
         f"catalog: {len(catalog)} rows | embeddings: {normalized.shape} | "
-        f"index: {index.ntotal} vectors | added {len(new_samples)} new track(s)"
+        f"index: {index.ntotal} vectors | added {added} new track(s)"
     )
 
 
@@ -126,11 +162,18 @@ def ingest_itunes(csv_path: str) -> None:
     AUDIO_DIR, then embed via the same pipeline as ingest_folder. Skips rows whose
     preview file already exists (idempotent-ish, SPEC.md §6) and rows with no preview
     available, logging both rather than crashing the batch.
+
+    This loop is rate-limited by ITUNES_SLEEP and can run for hours on a large CSV, so it
+    calls ingest_folder every ITUNES_CHECKPOINT_EVERY downloads (not just once at the
+    end) — if the run is interrupted, everything fetched up to the last checkpoint is
+    already embedded and safely in the catalog, and re-running the same CSV resumes
+    cleanly (already-downloaded previews are skipped via the on-disk existence check).
     """
     rows = pd.read_csv(csv_path)
     os.makedirs(AUDIO_DIR, exist_ok=True)
 
     preview_urls = {}
+    total_downloaded = 0
     for _, row in rows.iterrows():
         artist = str(row["artist"]).strip()
         title = str(row["title"]).strip()
@@ -169,11 +212,17 @@ def ingest_itunes(csv_path: str) -> None:
         with open(out_path, "wb") as f:
             f.write(audio_resp.content)
         preview_urls[out_path] = preview_url
+        total_downloaded += 1
         print(f"[ok] {artist} - {title} -> {out_path}")
+
+        if len(preview_urls) >= ITUNES_CHECKPOINT_EVERY:
+            print(f"--- checkpoint: embedding {len(preview_urls)} downloaded track(s) so far ---")
+            ingest_folder(AUDIO_DIR, preview_urls=preview_urls)
+            preview_urls = {}
 
         time.sleep(ITUNES_SLEEP)  # iTunes rate-limits around 20/min (SPEC.md §6)
 
     if preview_urls:
         ingest_folder(AUDIO_DIR, preview_urls=preview_urls)
-    else:
+    elif total_downloaded == 0:
         print("No new previews downloaded.")

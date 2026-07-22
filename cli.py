@@ -4,9 +4,17 @@ Recommendations are ranked purely by embedding similarity — no artist de-dup/c
 """
 
 import argparse
+import sys
 
 import numpy as np
 import pandas as pd
+
+# ingest_itunes prints raw artist/title strings, which can be any script (Hangul,
+# Devanagari, Tamil, ...) now that build_lists.py pulls non-English tracks. Windows'
+# default console codepage (cp1252) can't encode most of that and crashes on print();
+# force UTF-8 stdout/stderr with a safe fallback instead of erroring mid-run.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from config import AUDIO_DIR, CATALOG_PATH, EMB_PATH
 from src.ingest import ingest_folder, ingest_itunes
