@@ -9,3 +9,5 @@ data/audio/*
 data/embeddings.npy
 data/catalog.parquet
 data/index.faiss
+data/songs.csv
+data/.lastfm_cache/
