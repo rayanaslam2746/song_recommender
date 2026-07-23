@@ -131,12 +131,12 @@ const errorEl = document.getElementById('error');
 // same-song duplicates/versions score ~0.95+, while a "nothing great in the catalog"
 // query still returns its closest available neighbors around 0.75-0.85. Below that,
 // treat it as a weak/coincidental match rather than implying it's a real vibe match.
-const STRONG_THRESHOLD = 0.85;
-const DECENT_THRESHOLD = 0.70;
+const STRONG_THRESHOLD = 0.8;
+const DECENT_THRESHOLD = 0.65;
 
 function matchBadge(score) {
   if (score >= STRONG_THRESHOLD) return { label: 'Strong match', cls: 'match-strong' };
-  if (score >= DECENT_THRESHOLD) return { label: 'Decent match', cls: 'match-decent' };
+  if (score >= DECENT_THRESHOLD) return { label: 'Good match', cls: 'match-decent' };
   return { label: 'Weak match', cls: 'match-weak' };
 }
 
