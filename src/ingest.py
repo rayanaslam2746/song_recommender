@@ -35,6 +35,10 @@ CATALOG_DTYPES = {
     "artist": "object",
     "source_path": "object",
     "preview_url": "object",
+    # Nullable: only known for tracks fetched via ingest_itunes/append_track. Used for
+    # exact "do we already have this song?" lookups (WEB_APP_SPEC.md §1) instead of fuzzy
+    # artist/title string matching.
+    "itunes_track_id": "Int64",
 }
 
 
@@ -80,23 +84,46 @@ def _persist(catalog: pd.DataFrame, embeddings: np.ndarray):
     all three always agree, even if the process is killed right after this call returns
     (SPEC.md §5, §10 "row alignment is sacred"). Cheap even at thousands of rows, so it's
     safe to call after every chunk, not just once at the end.
+
+    Each file is written to a `.tmp` sibling and atomically swapped in via os.replace(),
+    rather than written in place — the web app (WEB_APP_SPEC.md) reads these same files
+    from request handlers with no lock of their own, so a reader landing mid-`np.save()`
+    would otherwise get a truncated array that silently decodes to garbage floats
+    (NaN/Inf), not an error. os.replace() is atomic on both Windows and POSIX, so a
+    concurrent reader always sees either the fully-old or fully-new file, never a torn one.
     """
     os.makedirs(os.path.dirname(CATALOG_PATH), exist_ok=True)
     normalized = normalize_embeddings(embeddings)
-    np.save(EMB_PATH, normalized)
-    catalog.to_parquet(CATALOG_PATH, index=False)
+
+    emb_tmp = EMB_PATH + ".tmp"
+    np.save(emb_tmp, normalized)
+    # np.save appends .npy if the name doesn't already end with it — EMB_PATH already
+    # does, so the tmp name picks up a second .npy (EMB_PATH + ".tmp.npy"); locate it.
+    if not os.path.exists(emb_tmp) and os.path.exists(emb_tmp + ".npy"):
+        emb_tmp = emb_tmp + ".npy"
+    os.replace(emb_tmp, EMB_PATH)
+
+    catalog_tmp = CATALOG_PATH + ".tmp"
+    catalog.to_parquet(catalog_tmp, index=False)
+    os.replace(catalog_tmp, CATALOG_PATH)
+
     index = build_index(normalized)
-    save_index(index, INDEX_PATH)
+    index_tmp = INDEX_PATH + ".tmp"
+    save_index(index, index_tmp)
+    os.replace(index_tmp, INDEX_PATH)
+
     return normalized, index
 
 
-def ingest_folder(audio_dir: str = AUDIO_DIR, preview_urls: dict = None) -> None:
+def ingest_folder(audio_dir: str = AUDIO_DIR, preview_urls: dict = None, itunes_track_ids: dict = None) -> None:
     """Recursively scan `audio_dir`, embed any tracks not already in the catalog, and
     rebuild catalog.parquet / embeddings.npy / index.faiss. Idempotent: re-running with
     no new files leaves the catalog unchanged.
 
     `preview_urls`, if given, maps source_path -> iTunes previewUrl for any of the new
     files (used by `ingest_itunes`); files not in the map get `preview_url=None`.
+    `itunes_track_ids` likewise maps source_path -> iTunes trackId (WEB_APP_SPEC.md §1);
+    files not in the map get `itunes_track_id=None` (unknown, not "no id exists").
 
     Embeds in chunks of EMBED_BATCH_SIZE rather than stacking the whole batch into one
     array — at thousands of tracks, one giant np.stack() would be tens of GB of raw audio
@@ -104,6 +131,7 @@ def ingest_folder(audio_dir: str = AUDIO_DIR, preview_urls: dict = None) -> None
     network drop) only loses the current chunk, not everything ingested so far.
     """
     preview_urls = preview_urls or {}
+    itunes_track_ids = itunes_track_ids or {}
     catalog = _load_catalog()
     embeddings = _load_embeddings()
     existing_paths = set(catalog["source_path"])
@@ -124,6 +152,7 @@ def ingest_folder(audio_dir: str = AUDIO_DIR, preview_urls: dict = None) -> None
         chunk_df["track_id"] = 0  # placeholder, reassigned below from row index
         catalog = pd.concat([catalog, chunk_df[list(CATALOG_DTYPES)]], ignore_index=True)
         catalog["track_id"] = catalog.index  # track_id = stable row index (SPEC.md §5)
+        catalog["itunes_track_id"] = catalog["itunes_track_id"].astype("Int64")
         added += len(buffer_samples)
         _persist(catalog, embeddings)
         print(f"  checkpoint: {len(catalog)} total rows persisted ({added} new so far)")
@@ -139,7 +168,13 @@ def ingest_folder(audio_dir: str = AUDIO_DIR, preview_urls: dict = None) -> None
             continue
         title, artist = _derive_title_artist(path)
         buffer_rows.append(
-            {"title": title, "artist": artist, "source_path": path, "preview_url": preview_urls.get(path)}
+            {
+                "title": title,
+                "artist": artist,
+                "source_path": path,
+                "preview_url": preview_urls.get(path),
+                "itunes_track_id": itunes_track_ids.get(path),
+            }
         )
         buffer_samples.append(samples)
         if len(buffer_samples) >= EMBED_BATCH_SIZE:
@@ -173,6 +208,7 @@ def ingest_itunes(csv_path: str) -> None:
     os.makedirs(AUDIO_DIR, exist_ok=True)
 
     preview_urls = {}
+    itunes_track_ids = {}
     total_downloaded = 0
     for _, row in rows.iterrows():
         artist = str(row["artist"]).strip()
@@ -202,6 +238,7 @@ def ingest_itunes(csv_path: str) -> None:
             continue
 
         preview_url = results[0]["previewUrl"]
+        track_id = results[0].get("trackId")
         try:
             audio_resp = requests.get(preview_url, timeout=30)
             audio_resp.raise_for_status()
@@ -212,17 +249,57 @@ def ingest_itunes(csv_path: str) -> None:
         with open(out_path, "wb") as f:
             f.write(audio_resp.content)
         preview_urls[out_path] = preview_url
+        itunes_track_ids[out_path] = track_id
         total_downloaded += 1
         print(f"[ok] {artist} - {title} -> {out_path}")
 
         if len(preview_urls) >= ITUNES_CHECKPOINT_EVERY:
             print(f"--- checkpoint: embedding {len(preview_urls)} downloaded track(s) so far ---")
-            ingest_folder(AUDIO_DIR, preview_urls=preview_urls)
+            ingest_folder(AUDIO_DIR, preview_urls=preview_urls, itunes_track_ids=itunes_track_ids)
             preview_urls = {}
+            itunes_track_ids = {}
 
         time.sleep(ITUNES_SLEEP)  # iTunes rate-limits around 20/min (SPEC.md §6)
 
     if preview_urls:
-        ingest_folder(AUDIO_DIR, preview_urls=preview_urls)
+        ingest_folder(AUDIO_DIR, preview_urls=preview_urls, itunes_track_ids=itunes_track_ids)
     elif total_downloaded == 0:
         print("No new previews downloaded.")
+
+
+def append_track(
+    embedding: np.ndarray,
+    *,
+    title: str,
+    artist: str,
+    source_path: str = None,
+    preview_url: str = None,
+    itunes_track_id: int = None,
+) -> int:
+    """Append a single already-embedded track to catalog/embeddings.npy/index.faiss and
+    persist, returning its new track_id. Used by the web app's cold path
+    (WEB_APP_SPEC.md §2) so the append and the row-alignment invariant are enforced here,
+    not duplicated in server.py.
+    """
+    catalog = _load_catalog()
+    embeddings = _load_embeddings()
+
+    row = {
+        "title": title,
+        "artist": artist,
+        "source_path": source_path,
+        "preview_url": preview_url,
+        "itunes_track_id": itunes_track_id,
+    }
+    chunk_df = pd.DataFrame([row])
+    chunk_df["track_id"] = 0  # placeholder, reassigned below from row index
+    catalog = pd.concat([catalog, chunk_df[list(CATALOG_DTYPES)]], ignore_index=True)
+    catalog["track_id"] = catalog.index
+    catalog["itunes_track_id"] = catalog["itunes_track_id"].astype("Int64")
+
+    embeddings = np.concatenate(
+        [embeddings, np.asarray(embedding, dtype=np.float32).reshape(1, -1)], axis=0
+    )
+
+    _persist(catalog, embeddings)
+    return int(catalog["track_id"].iloc[-1])

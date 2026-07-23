@@ -10,3 +10,5 @@ pyarrow
 requests
 tqdm
 pytest
+fastapi
+uvicorn

@@ -49,11 +49,35 @@ python cli.py recommend --file ~/Downloads/some_song.mp3 --k 10
 python cli.py recommend --search "Anirudh Unakkul Naanae" --k 10
 ```
 
+## Web UI
+
+A small local web app (see [WEB_APP_SPEC.md](WEB_APP_SPEC.md)) so you can search for a
+song, pick a match, and hear sound-alike recommendations in the browser — no CLI, no
+audio files to handle yourself.
+
+If you have a catalog from before this feature existed, backfill the new
+`itunes_track_id` column once (safe to re-run; no-ops if already present):
+```
+python migrate_add_itunes_track_id.py
+```
+
+Then start the server and open the page:
+```
+python -m uvicorn server:app --host 127.0.0.1 --port 8000
+# then open http://127.0.0.1:8000
+```
+
+The first startup takes ~30s while the CLAP checkpoint loads (once, at process start —
+every query after that is ~3-4s). The server must stay running while the page is in use.
+Searching a song already in the catalog returns recommendations near-instantly; a new
+song gets downloaded, embedded, and added to the catalog on the spot, so searching it
+again later is instant too.
+
 ## Status
 
-`src/audio.py`, `src/embed.py`, `src/index_store.py`, `src/recommend.py`, and the folder
-path of `src/ingest.py` (`ingest_folder` / `cli.py ingest --audio-dir`) are functional.
-`ingest_itunes` (CSV batch path) is still a stub.
+`src/audio.py`, `src/embed.py`, `src/index_store.py`, `src/recommend.py`, both paths of
+`src/ingest.py` (`ingest_folder` and `ingest_itunes`), and the FastAPI web UI
+(`server.py` + `static/index.html`) are functional.
 
 Recommendations are ranked purely by embedding similarity, with no artist de-dup/cap
 (SPEC.md §1.3).

@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Song Vibe Finder</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    max-width: 600px;
+    margin: 40px auto;
+    padding: 0 16px;
+    line-height: 1.5;
+    color: #1a1a1a;
+  }
+  h1 { margin-bottom: 4px; }
+  .instructions { color: #555; margin-top: 0; margin-bottom: 24px; }
+  .search-bar { display: flex; gap: 8px; margin-bottom: 24px; }
+  #query {
+    flex: 1;
+    font-size: 16px;
+    padding: 10px 12px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+  }
+  #search-btn {
+    font-size: 16px;
+    padding: 10px 16px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #f5f5f5;
+    cursor: pointer;
+  }
+  .status { color: #555; }
+  .error { color: #b00020; }
+  .song-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .song-row:hover { background: #f0f0f0; }
+  .song-row.disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .song-row.disabled:hover { background: none; }
+  .song-row img { border-radius: 4px; flex-shrink: 0; }
+  .song-info { flex: 1; min-width: 0; }
+  .song-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .song-artist { color: #555; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .unavailable { color: #999; font-size: 13px; white-space: nowrap; }
+  #recommendations { margin-top: 32px; }
+  .rec-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 8px;
+    border-bottom: 1px solid #eee;
+  }
+  .rec-rank { font-weight: 600; color: #888; width: 28px; flex-shrink: 0; }
+  .rec-info { flex: 1; min-width: 0; }
+  .rec-info audio { width: 100%; margin-top: 6px; height: 32px; }
+</style>
+</head>
+<body>
+
+<h1>Song Vibe Finder</h1>
+<p class="instructions">Start typing your song and press Enter for results.</p>
+
+<div class="search-bar">
+  <input id="query" type="text" placeholder="Search for a song..." autofocus>
+  <button id="search-btn">Search</button>
+</div>
+
+<p id="error" class="error"></p>
+<div id="results"></div>
+<div id="recommendations"></div>
+
+<script>
+const input = document.getElementById('query');
+const searchBtn = document.getElementById('search-btn');
+const resultsEl = document.getElementById('results');
+const recEl = document.getElementById('recommendations');
+const errorEl = document.getElementById('error');
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s ?? '';
+  return div.innerHTML;
+}
+
+async function doSearch() {
+  const q = input.value.trim();
+  if (!q) return;
+
+  errorEl.textContent = '';
+  recEl.innerHTML = '';
+  resultsEl.innerHTML = '<p class="status">Searching...</p>';
+
+  try {
+    const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || 'Search failed');
+    renderResults(data.results);
+  } catch (e) {
+    resultsEl.innerHTML = '';
+    errorEl.textContent = e.message;
+  }
+}
+
+function renderResults(results) {
+  if (!results.length) {
+    resultsEl.innerHTML = '<p class="status">No results.</p>';
+    return;
+  }
+  resultsEl.innerHTML = '';
+  for (const r of results) {
+    const row = document.createElement('div');
+    row.className = 'song-row' + (r.preview_url ? '' : ' disabled');
+    row.innerHTML = `
+      <img src="${r.artwork || ''}" alt="" width="48" height="48">
+      <div class="song-info">
+        <div class="song-title">${escapeHtml(r.title)}</div>
+        <div class="song-artist">${escapeHtml(r.artist)}</div>
+      </div>
+      ${r.preview_url ? '' : '<span class="unavailable">preview unavailable</span>'}
+    `;
+    if (r.preview_url) {
+      row.addEventListener('click', () => selectSong(r));
+    }
+    resultsEl.appendChild(row);
+  }
+}
+
+async function selectSong(song) {
+  errorEl.textContent = '';
+  recEl.innerHTML = '<p class="status">Analyzing this track...</p>';
+
+  try {
+    const resp = await fetch('/api/recommend', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        itunes_track_id: song.itunes_track_id,
+        title: song.title,
+        artist: song.artist,
+        preview_url: song.preview_url,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || 'Recommendation failed');
+    renderRecommendations(data.results);
+  } catch (e) {
+    recEl.innerHTML = '';
+    errorEl.textContent = e.message;
+  }
+}
+
+function renderRecommendations(results) {
+  if (!results.length) {
+    recEl.innerHTML = '<p class="status">No recommendations found.</p>';
+    return;
+  }
+  recEl.innerHTML = '<h2>Sounds like...</h2>';
+  results.forEach((r, i) => {
+    const row = document.createElement('div');
+    row.className = 'rec-row';
+    row.innerHTML = `
+      <div class="rec-rank">#${i + 1}</div>
+      <div class="rec-info">
+        <div class="song-title">${escapeHtml(r.title)}</div>
+        <div class="song-artist">${escapeHtml(r.artist)} &middot; score ${r.score.toFixed(3)}</div>
+        ${r.preview_url
+          ? `<audio controls src="${r.preview_url}"></audio>`
+          : '<span class="unavailable">no preview</span>'}
+      </div>
+    `;
+    recEl.appendChild(row);
+  });
+}
+
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') doSearch();
+});
+searchBtn.addEventListener('click', doSearch);
+</script>
+
+</body>
+</html>

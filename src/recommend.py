@@ -35,11 +35,23 @@ def recommend(query_vector: np.ndarray, k: int = 10, exclude_track_id=None) -> l
     for score, row_id in zip(scores[0], ids[0]):
         if row_id < 0:
             continue
+        # NaN/Inf scores aren't valid JSON (Starlette's renderer rejects them outright) and
+        # indicate a degenerate embedding somewhere, not a real match — skip rather than crash.
+        if not np.isfinite(score):
+            continue
         row = catalog.iloc[int(row_id)]
         track_id = int(row["track_id"])
 
         if exclude_track_id is not None and track_id == exclude_track_id:
             continue
+
+        # A handful of pre-ingest_itunes rows have preview_url stored as a bare float NaN
+        # (missing), not None — pandas' "object" dtype doesn't guarantee which one you get
+        # back from a parquet round-trip. json.dumps(allow_nan=False), which Starlette uses,
+        # rejects a raw NaN outright, so normalize it to None (-> JSON null) here.
+        preview_url = row["preview_url"]
+        if pd.isna(preview_url):
+            preview_url = None
 
         results.append(
             {
@@ -47,7 +59,7 @@ def recommend(query_vector: np.ndarray, k: int = 10, exclude_track_id=None) -> l
                 "title": row["title"],
                 "artist": row["artist"],
                 "score": float(score),
-                "preview_url": row["preview_url"],
+                "preview_url": preview_url,
             }
         )
         if len(results) >= k:

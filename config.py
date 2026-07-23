@@ -76,3 +76,11 @@ GENRE_IDS = {
     "tamil": "1264",
     "telugu": "1265",
 }
+
+# --- Web UI (WEB_APP_SPEC.md) ---
+ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
+SEARCH_LIMIT = 10
+SEARCH_CACHE_TTL = 86400  # seconds
+SEARCH_CACHE_MAX = 1000  # entries
+SERVER_HOST = "127.0.0.1"
+SERVER_PORT = 8000
